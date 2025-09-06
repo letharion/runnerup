@@ -195,6 +195,8 @@ public class SyncManager {
       synchronizer = new WebDavSynchronizer(simplifier);
     } else if (synchronizerName.contentEquals(EndurainSynchronizer.NAME)) {
       synchronizer = new EndurainSynchronizer(simplifier);
+    } else if (synchronizerName.contentEquals(LLMSynchronizer.NAME)) {
+      synchronizer = new LLMSynchronizer(mContext);
     } else {
       Log.e(getClass().getName(), "synchronizer does not exist: " + synchronizerName);
     }
