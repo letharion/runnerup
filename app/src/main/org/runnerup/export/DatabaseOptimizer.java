@@ -25,6 +25,9 @@ public class DatabaseOptimizer {
     
     private static final String TAG = "DatabaseOptimizer";
     
+    // Database connection pooling with proper synchronization
+    private static final Object DB_LOCK = new Object();
+    
     // Prepared statement cache for common queries
     private static SQLiteStatement sRecentActivitiesStmt;
     private static SQLiteStatement sLapDetailsStmt;
@@ -160,50 +163,60 @@ public class DatabaseOptimizer {
      * Get prepared statement for recent activities query
      */
     public static SQLiteStatement getRecentActivitiesStatement(Context context) {
-        if (sRecentActivitiesStmt == null) {
-            optimizeDatabase(context);
+        synchronized (DB_LOCK) {
+            if (sRecentActivitiesStmt == null) {
+                optimizeDatabase(context);
+            }
+            return sRecentActivitiesStmt;
         }
-        return sRecentActivitiesStmt;
     }
     
     /**
      * Get prepared statement for lap details query
      */
     public static SQLiteStatement getLapDetailsStatement(Context context) {
-        if (sLapDetailsStmt == null) {
-            optimizeDatabase(context);
+        synchronized (DB_LOCK) {
+            if (sLapDetailsStmt == null) {
+                optimizeDatabase(context);
+            }
+            return sLapDetailsStmt;
         }
-        return sLapDetailsStmt;
     }
     
     /**
      * Get prepared statement for weekly stats query
      */
     public static SQLiteStatement getWeeklyStatsStatement(Context context) {
-        if (sWeeklyStatsStmt == null) {
-            optimizeDatabase(context);
+        synchronized (DB_LOCK) {
+            if (sWeeklyStatsStmt == null) {
+                optimizeDatabase(context);
+            }
+            return sWeeklyStatsStmt;
         }
-        return sWeeklyStatsStmt;
     }
     
     /**
      * Get prepared statement for performance trends query
      */
     public static SQLiteStatement getPerformanceTrendsStatement(Context context) {
-        if (sPerformanceTrendsStmt == null) {
-            optimizeDatabase(context);
+        synchronized (DB_LOCK) {
+            if (sPerformanceTrendsStmt == null) {
+                optimizeDatabase(context);
+            }
+            return sPerformanceTrendsStmt;
         }
-        return sPerformanceTrendsStmt;
     }
     
     /**
      * Get prepared statement for weekly distance query
      */
     public static SQLiteStatement getWeeklyDistanceStatement(Context context) {
-        if (sWeeklyDistanceStmt == null) {
-            optimizeDatabase(context);
+        synchronized (DB_LOCK) {
+            if (sWeeklyDistanceStmt == null) {
+                optimizeDatabase(context);
+            }
+            return sWeeklyDistanceStmt;
         }
-        return sWeeklyDistanceStmt;
     }
     
     /**

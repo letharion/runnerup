@@ -25,6 +25,9 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.lang.ref.WeakReference;
+import java.util.Map;
 
 /**
  * Analyzes user's training history to provide meaningful context for LLM workout generation
@@ -32,6 +35,9 @@ import java.util.concurrent.TimeUnit;
 public class TrainingHistoryAnalyzer {
     
     private static final String TAG = "TrainingHistoryAnalyzer";
+    
+    // Memory-optimized activity cache with weak references for large datasets
+    private static final Map<Long, WeakReference<ActivitySummary>> activityCache = new ConcurrentHashMap<>();
     
     private final SQLiteDatabase database;
     private final Context context;
@@ -309,13 +315,10 @@ public class TrainingHistoryAnalyzer {
         
         String[] args = {String.valueOf(weekStart / 1000), String.valueOf(weekEnd / 1000)};
         
-        Cursor cursor = database.rawQuery(query, args);
-        try {
+        try (Cursor cursor = database.rawQuery(query, args)) {
             if (cursor.moveToFirst()) {
                 return cursor.getDouble(0);
             }
-        } finally {
-            cursor.close();
         }
         return 0;
     }
@@ -361,6 +364,41 @@ public class TrainingHistoryAnalyzer {
             case DB.ACTIVITY.SPORT_OTHER:
             default: return "Other";
         }
+    }
+    
+    /**
+     * Get cached activity with weak reference management
+     */
+    private ActivitySummary getCachedActivity(long id) {
+        WeakReference<ActivitySummary> ref = activityCache.get(id);
+        if (ref != null) {
+            ActivitySummary activity = ref.get();
+            if (activity != null) {
+                return activity;
+            }
+            // Clean up dead reference
+            activityCache.remove(id);
+        }
+        return null;
+    }
+    
+    /**
+     * Cache activity with weak reference for memory efficiency
+     */
+    private void cacheActivity(ActivitySummary activity) {
+        activityCache.put(activity.id, new WeakReference<>(activity));
+        
+        // Periodically clean up dead references to prevent memory leaks
+        if (activityCache.size() > ValidationLimits.MAX_CACHE_SIZE_BEFORE_CLEANUP) {
+            cleanupDeadReferences();
+        }
+    }
+    
+    /**
+     * Clean up dead weak references to prevent accumulation
+     */
+    private void cleanupDeadReferences() {
+        activityCache.entrySet().removeIf(entry -> entry.getValue().get() == null);
     }
     
     private String getIntensityName(int intensity) {

@@ -23,6 +23,11 @@ import java.net.HttpURLConnection;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.util.concurrent.TimeUnit;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Robust LLM request handler with retries, validation, and error recovery
@@ -74,6 +79,7 @@ public class LLMRequestHandler {
      * Make LLM request with context and retry logic
      */
     public LLMResponse makeRequest(String prompt, RequestContext context) throws LLMException {
+        String requestId = generateRequestId();
         LLMException lastException = null;
         
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -84,7 +90,7 @@ public class LLMRequestHandler {
                 enforceRateLimit();
                 
                 // Make the request
-                String response = executeRequest(prompt, context);
+                String response = executeRequest(prompt, context, requestId);
                 
                 // Validate response
                 LLMResponse llmResponse = validateAndParseResponse(response, context);
@@ -93,8 +99,18 @@ public class LLMRequestHandler {
                 return llmResponse;
                 
             } catch (LLMException e) {
-                lastException = e;
-                Log.w(TAG, "LLM request attempt " + attempt + " failed: " + e.getMessage());
+                // Add request context to exception
+                Map<String, Object> errorContext = new HashMap<>();
+                errorContext.put("attempt", attempt);
+                errorContext.put("maxRetries", MAX_RETRIES);
+                errorContext.put("apiProvider", apiProvider);
+                if (context != null) {
+                    errorContext.put("expectedResponseType", context.expectedResponseType);
+                    errorContext.put("workoutType", context.workoutType);
+                }
+                
+                lastException = new LLMException(e.getMessage(), e.getErrorType(), requestId, errorContext, e.getCause());
+                Log.w(TAG, "LLM request attempt " + attempt + " failed (requestId: " + requestId + "): " + e.getMessage());
                 
                 // Don't retry for certain error types
                 if (!shouldRetry(e, attempt)) {
@@ -120,14 +136,18 @@ public class LLMRequestHandler {
         if (lastException != null) {
             throw lastException;
         } else {
-            throw new LLMException("Unknown error after " + MAX_RETRIES + " attempts");
+            Map<String, Object> context = new HashMap<>();
+            context.put("maxRetries", MAX_RETRIES);
+            context.put("apiProvider", apiProvider);
+            throw new LLMException("Unknown error after " + MAX_RETRIES + " attempts", 
+                LLMException.ErrorType.UNKNOWN_ERROR, requestId, context);
         }
     }
     
     /**
      * Execute the actual HTTP request
      */
-    private String executeRequest(String prompt, RequestContext context) throws LLMException {
+    private String executeRequest(String prompt, RequestContext context, String requestId) throws LLMException {
         try {
             String apiUrl = getApiUrl();
             JSONObject requestBody = buildRequestBody(prompt, context);
@@ -455,6 +475,10 @@ public class LLMRequestHandler {
         return BASE_RETRY_DELAY_MS * (1L << (attemptNumber - 1));
     }
     
+    private String generateRequestId() {
+        return UUID.randomUUID().toString().substring(0, 8);
+    }
+    
     /**
      * Request context for additional parameters and validation
      */
@@ -515,29 +539,61 @@ public class LLMRequestHandler {
         }
         
         private final ErrorType errorType;
+        private final String requestId;
+        private final Map<String, Object> debugContext;
         
         public LLMException(String message, ErrorType errorType) {
             super(message);
             this.errorType = errorType;
+            this.requestId = null;
+            this.debugContext = new HashMap<>();
         }
         
         public LLMException(String message, ErrorType errorType, Throwable cause) {
             super(message, cause);
             this.errorType = errorType;
+            this.requestId = null;
+            this.debugContext = new HashMap<>();
+        }
+        
+        public LLMException(String message, ErrorType errorType, String requestId, Map<String, Object> context) {
+            super(message);
+            this.errorType = errorType;
+            this.requestId = requestId;
+            this.debugContext = context != null ? new HashMap<>(context) : new HashMap<>();
+        }
+        
+        public LLMException(String message, ErrorType errorType, String requestId, Map<String, Object> context, Throwable cause) {
+            super(message, cause);
+            this.errorType = errorType;
+            this.requestId = requestId;
+            this.debugContext = context != null ? new HashMap<>(context) : new HashMap<>();
         }
         
         public LLMException(String message) {
             super(message);
             this.errorType = ErrorType.UNKNOWN_ERROR;
+            this.requestId = null;
+            this.debugContext = new HashMap<>();
         }
         
         public LLMException(String message, Throwable cause) {
             super(message, cause);
             this.errorType = ErrorType.UNKNOWN_ERROR;
+            this.requestId = null;
+            this.debugContext = new HashMap<>();
         }
         
         public ErrorType getErrorType() {
             return errorType;
+        }
+        
+        public String getRequestId() {
+            return requestId;
+        }
+        
+        public Map<String, Object> getDebugContext() {
+            return new HashMap<>(debugContext);
         }
         
         public boolean isRetryable() {
@@ -554,46 +610,47 @@ public class LLMRequestHandler {
     }
     
     /**
-     * Token bucket implementation for sophisticated rate limiting
+     * Token bucket implementation for sophisticated rate limiting with thread safety
      */
     private static class TokenBucket {
         private final int capacity;
         private final long refillIntervalMs;
-        private int tokens;
-        private long lastRefillTime;
+        private final AtomicInteger tokens;
+        private final AtomicLong lastRefillTime;
         
         public TokenBucket(int requestsPerMinute) {
             this.capacity = requestsPerMinute;
             this.refillIntervalMs = 60000L / requestsPerMinute; // milliseconds between token refills
-            this.tokens = capacity;
-            this.lastRefillTime = System.currentTimeMillis();
+            this.tokens = new AtomicInteger(capacity);
+            this.lastRefillTime = new AtomicLong(System.currentTimeMillis());
         }
         
         public synchronized boolean tryConsume() {
             refill();
-            if (tokens > 0) {
-                tokens--;
-                return true;
-            }
-            return false;
+            return tokens.compareAndSet(tokens.get(), Math.max(0, tokens.get() - 1)) && tokens.get() >= 0;
         }
         
         public synchronized long getRefillTimeMs() {
             refill();
-            if (tokens > 0) {
+            if (tokens.get() > 0) {
                 return 0;
             }
-            return refillIntervalMs - (System.currentTimeMillis() - lastRefillTime);
+            return refillIntervalMs - (System.currentTimeMillis() - lastRefillTime.get());
         }
         
         private void refill() {
             long currentTime = System.currentTimeMillis();
-            long timePassed = currentTime - lastRefillTime;
+            long lastRefill = lastRefillTime.get();
+            long timePassed = currentTime - lastRefill;
             int tokensToAdd = (int) (timePassed / refillIntervalMs);
             
             if (tokensToAdd > 0) {
-                tokens = Math.min(capacity, tokens + tokensToAdd);
-                lastRefillTime = currentTime;
+                // Use compareAndSet to ensure atomic update
+                if (lastRefillTime.compareAndSet(lastRefill, currentTime)) {
+                    int currentTokens = tokens.get();
+                    int newTokens = Math.min(capacity, currentTokens + tokensToAdd);
+                    tokens.set(newTokens);
+                }
             }
         }
     }

@@ -40,6 +40,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 
 public class LLMSynchronizer extends DefaultSynchronizer {
     
@@ -54,6 +57,9 @@ public class LLMSynchronizer extends DefaultSynchronizer {
     private static final String CONFIG_API_KEY = "api_key";
     private static final String CONFIG_API_PROVIDER = "api_provider";
     private static final String CONFIG_USE_LOCAL = "use_local";
+    
+    // Supported API providers
+    private static final Set<String> SUPPORTED_PROVIDERS = new HashSet<>(Arrays.asList("openai", "anthropic"));
     
     // API configuration
     private String apiKey;
@@ -98,10 +104,18 @@ public class LLMSynchronizer extends DefaultSynchronizer {
         if (config != null) {
             apiKey = config.getAsString(CONFIG_API_KEY);
             
-            String provider = config.getAsString(CONFIG_API_PROVIDER);
-            if (provider != null) {
-                apiProvider = provider;
+            // Add validation for API key format
+            if (apiKey != null && !isValidApiKeyFormat(apiKey)) {
+                Log.w(TAG, "Invalid API key format detected");
+                apiKey = null;
             }
+            
+            String provider = config.getAsString(CONFIG_API_PROVIDER);
+            if (provider != null && !SUPPORTED_PROVIDERS.contains(provider.toLowerCase())) {
+                Log.w(TAG, "Unsupported provider: " + provider + ", defaulting to OpenAI");
+                provider = "openai";
+            }
+            apiProvider = provider != null ? provider : "openai";
             
             Boolean useLocal = config.getAsBoolean(CONFIG_USE_LOCAL);
             if (useLocal != null) {
@@ -204,7 +218,8 @@ public class LLMSynchronizer extends DefaultSynchronizer {
     /**
      * Generate workout JSON using LLM based on user's training data
      */
-    public String generateWorkoutJson(String workoutType, List<LLMPromptBuilder.TrainingData> userData) throws Exception {
+    public String generateWorkoutJson(String workoutType, List<LLMPromptBuilder.TrainingData> userData) 
+        throws LLMRequestHandler.LLMException, WorkoutValidationException, NetworkException {
         TrainingHistoryAnalyzer.TrainingAnalysis analysis = getTrainingAnalysis();
         String prompt = LLMPromptBuilder.buildAdvancedWorkoutPrompt(workoutType, analysis);
         String llmResponse;
@@ -262,17 +277,22 @@ public class LLMSynchronizer extends DefaultSynchronizer {
             return response.content;
             
         } catch (LLMRequestHandler.LLMException e) {
-            Log.e(TAG, "LLM request failed: " + e.getMessage(), e);
-            
-            // Convert to generic exception for now (could be enhanced)
+            // Use different log levels based on severity
             if (e.getErrorType() == LLMRequestHandler.LLMException.ErrorType.AUTHENTICATION_ERROR) {
-                throw new Exception("Invalid API key - please check your configuration");
+                Log.e(TAG, "Authentication failed for " + apiProvider, e); // Error level
+                throw new NetworkException("Invalid API key - please check your configuration", e);
             } else if (e.getErrorType() == LLMRequestHandler.LLMException.ErrorType.RATE_LIMITED) {
-                throw new Exception("API rate limit exceeded - please try again later");
+                Log.w(TAG, "Rate limited by " + apiProvider, e); // Warning level
+                throw new NetworkException("API rate limit exceeded - please try again later", 429, e);
             } else if (e.getErrorType() == LLMRequestHandler.LLMException.ErrorType.INVALID_WORKOUT_FORMAT) {
-                throw new Exception("Generated workout format was invalid - please try again");
+                Log.w(TAG, "Invalid workout format returned", e); // Warning level
+                throw new WorkoutValidationException("Generated workout format was invalid - please try again", context != null ? context.workoutType : workoutType, e);
+            } else if (e.getErrorType() == LLMRequestHandler.LLMException.ErrorType.NETWORK_ERROR) {
+                Log.w(TAG, "Network error occurred", e); // Warning level
+                throw new NetworkException("Network error: " + e.getMessage(), e);
             } else {
-                throw new Exception("LLM request failed: " + e.getMessage());
+                Log.e(TAG, "LLM request failed with error: " + e.getErrorType(), e); // Error level
+                throw e; // Re-throw the LLMException with all context
             }
         }
     }
@@ -503,6 +523,30 @@ public class LLMSynchronizer extends DefaultSynchronizer {
         }
         
         return activities;
+    }
+    
+    /**
+     * Validate API key format based on provider
+     */
+    private boolean isValidApiKeyFormat(String apiKey) {
+        if (apiKey == null || apiKey.trim().isEmpty()) {
+            return false;
+        }
+        
+        // Remove whitespace and check basic format
+        apiKey = apiKey.trim();
+        
+        switch (apiProvider.toLowerCase()) {
+            case "openai":
+                // OpenAI keys typically start with "sk-" and are around 51 characters
+                return apiKey.startsWith("sk-") && apiKey.length() > 20 && apiKey.length() < 100;
+            case "anthropic":
+                // Anthropic keys typically start with "sk-ant-" and are longer
+                return apiKey.startsWith("sk-ant-") && apiKey.length() > 30 && apiKey.length() < 150;
+            default:
+                // For unknown providers, just check it's not empty and reasonable length
+                return apiKey.length() > 10 && apiKey.length() < 200;
+        }
     }
     
 }

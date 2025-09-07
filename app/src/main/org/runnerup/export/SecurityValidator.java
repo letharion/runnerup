@@ -19,6 +19,8 @@ import org.json.JSONObject;
 import java.util.regex.Pattern;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
 
 /**
  * Comprehensive security validation for LLM inputs and outputs
@@ -29,21 +31,22 @@ public class SecurityValidator {
     private static final String TAG = "SecurityValidator";
     
     // Enhanced input validation constants (using centralized constants)
-    private static final int MAX_PROMPT_LENGTH = LLMConstants.MAX_PROMPT_LENGTH;
-    private static final int MAX_WORKOUT_NAME_LENGTH = LLMConstants.MAX_WORKOUT_NAME_LENGTH;
-    private static final int MAX_COMMENT_LENGTH = LLMConstants.MAX_COMMENT_LENGTH;
-    private static final int MAX_RACE_NAME_LENGTH = LLMConstants.MAX_RACE_NAME_LENGTH;
-    private static final int MAX_JSON_RESPONSE_LENGTH = LLMConstants.MAX_JSON_RESPONSE_LENGTH;
+    private static final int MAX_PROMPT_LENGTH = ValidationLimits.MAX_PROMPT_LENGTH;
+    private static final int MAX_WORKOUT_NAME_LENGTH = ValidationLimits.MAX_WORKOUT_NAME_LENGTH;
+    private static final int MAX_COMMENT_LENGTH = ValidationLimits.MAX_COMMENT_LENGTH;
+    private static final int MAX_RACE_NAME_LENGTH = ValidationLimits.MAX_RACE_NAME_LENGTH;
+    private static final int MAX_JSON_RESPONSE_LENGTH = ValidationLimits.MAX_JSON_RESPONSE_LENGTH;
     
     // Enhanced validation limits
-    private static final int MAX_NESTING_DEPTH = LLMConstants.MAX_NESTING_DEPTH;
-    private static final int MAX_WORKOUT_STEPS = LLMConstants.MAX_WORKOUT_STEPS;
-    private static final int PROMPT_INJECTION_LOG_LENGTH = LLMConstants.PROMPT_INJECTION_LOG_LENGTH;
+    private static final int MAX_NESTING_DEPTH = ValidationLimits.MAX_NESTING_DEPTH;
+    private static final int MAX_WORKOUT_STEPS = ValidationLimits.MAX_WORKOUT_STEPS;
+    private static final int PROMPT_INJECTION_LOG_LENGTH = ValidationLimits.PROMPT_INJECTION_LOG_LENGTH;
     
     // Rate limiting for validation calls (prevent DoS)
-    private static long lastValidationTime = 0;
-    private static int validationCallCount = 0;
-    private static final int MAX_VALIDATION_CALLS_PER_SECOND = 50;
+    private static final Map<String, Long> lastValidationByUser = new ConcurrentHashMap<>();
+    private static final Map<String, Integer> validationCountByUser = new ConcurrentHashMap<>();
+    private static final int MAX_VALIDATION_CALLS_PER_SECOND = ValidationLimits.MAX_VALIDATION_CALLS_PER_SECOND;
+    private static final long VALIDATION_RATE_LIMIT_WINDOW_MS = ValidationLimits.VALIDATION_RATE_LIMIT_WINDOW_MS;
     
     // Suspicious patterns for prompt injection detection
     private static final Pattern[] PROMPT_INJECTION_PATTERNS = {
@@ -113,6 +116,30 @@ public class SecurityValidator {
      * Validate and sanitize user input before sending to LLM
      */
     public static ValidationResult validateUserInput(String input, InputType type) {
+        return validateUserInput(input, type, null);
+    }
+
+    /**
+     * Validate and sanitize user input before sending to LLM with user-based rate limiting
+     */
+    public static ValidationResult validateUserInput(String input, InputType type, String userId) {
+        // Add rate limiting to prevent DoS attacks on validation
+        if (userId != null) {
+            Long lastValidation = lastValidationByUser.get(userId);
+            long currentTime = System.currentTimeMillis();
+            
+            if (lastValidation != null && currentTime - lastValidation < VALIDATION_RATE_LIMIT_WINDOW_MS) {
+                Integer count = validationCountByUser.getOrDefault(userId, 0);
+                if (count >= MAX_VALIDATION_CALLS_PER_SECOND) {
+                    return ValidationResult.invalid("Validation rate limit exceeded");
+                }
+                validationCountByUser.put(userId, count + 1);
+            } else {
+                validationCountByUser.put(userId, 1);
+            }
+            lastValidationByUser.put(userId, currentTime);
+        }
+        
         ValidationResult result = new ValidationResult();
         
         if (input == null) {
@@ -424,19 +451,19 @@ public class SecurityValidator {
         switch (endConditionType) {
             case "time":
                 // Time in milliseconds: 1 second to 24 hours
-                return value >= 1000 && value <= 24 * 60 * 60 * 1000;
+                return value >= ValidationLimits.MIN_STEP_TIME_MS && value <= ValidationLimits.MAX_STEP_TIME_MS;
                 
             case "distance":
                 // Distance in meters: 10m to 200km
-                return value >= 10 && value <= 200000;
+                return value >= ValidationLimits.MIN_STEP_DISTANCE_SECURITY && value <= ValidationLimits.MAX_STEP_DISTANCE_SECURITY;
                 
             case "iterations":
                 // Number of iterations: 1 to 100
-                return value >= 1 && value <= 100;
+                return value >= ValidationLimits.MIN_ITERATIONS && value <= ValidationLimits.MAX_ITERATIONS_SECURITY;
                 
             default:
                 // For unknown types, allow reasonable positive values
-                return value >= 0 && value <= 1000000;
+                return value >= ValidationLimits.MIN_GENERIC_VALUE && value <= ValidationLimits.MAX_GENERIC_VALUE;
         }
     }
     
